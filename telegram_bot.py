@@ -7,8 +7,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from groq import Groq
 
 # بيانات الاعتماد ومفتاحك المجاني
-TELEGRAM_TOKEN = "9004247685:AAH-n51izUpTpGznkIMIa0KzAWtvEmREa_w"
-GROQ_API_KEY = "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"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
