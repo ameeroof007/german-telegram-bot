@@ -166,4 +166,6 @@ async def enable_daily_lessons(update: Update, context: ContextTypes.DEFAULT_TYP
     save_progress(progress)
     await update.message.reply_text(
         "✅ تم تفعيل نظام الدروس اليومية بنجاح!\n"
-        "ستصلك رسالة درس واحدة يومياً في الساعة 09:0
+        "ستصلك رسالة درس واحدة يومياً في الساعة 09:00 صباحاً بتوقيت ألمانيا.\n\n"
+        "للحصول على الدرس التجريبي الآن فوراً، أرسل: /test_lesson"
+    )
