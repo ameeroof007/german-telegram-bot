@@ -108,7 +108,7 @@ def save_progress(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_free_model():
-    return "llama-3.1-8b-instant"
+    return "llama3-8b-8192"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
