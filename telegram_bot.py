@@ -143,17 +143,18 @@ async def send_scheduled_lesson(context: ContextTypes.DEFAULT_TYPE):
         f"5. سؤال تمرين صغير في النهاية ليختبر الطالب نفسه."
     )
 
-    chosen_model = get_free_model()
-    chat_completion = client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        model=chosen_model,
-    )
-    lesson_text = chat_completion.choices[0].message.content
-
-    await context.bot.send_message(chat_id=chat_id, text=lesson_text)
-
-    progress["lesson_index"] = idx + 1
-    save_progress(progress)
+    try:
+        chosen_model = get_free_model()
+        chat_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=chosen_model,
+        )
+        lesson_text = chat_completion.choices[0].message.content
+        await context.bot.send_message(chat_id=chat_id, text=lesson_text)
+        progress["lesson_index"] = idx + 1
+        save_progress(progress)
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ في إرسال الدرس: {str(e)}")
 
 async def enable_daily_lessons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress = load_progress()
@@ -193,8 +194,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         reply_text = response.choices[0].message.content
         await update.message.reply_text(reply_text)
-    except Exception:
-        await update.message.reply_text("عذراً، حدث خطأ بسيط أثناء معالجة سؤالك. حاول مجدداً بعد قليل.")
+    except Exception as e:
+        # يظهر لك الخطأ الفعلي مباشرة على تيليجرام لنعرف السبب إن وجد
+        await update.message.reply_text(f"⚠️ خطأ تقني من Groq: {str(e)}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
