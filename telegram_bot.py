@@ -6,18 +6,19 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from groq import Groq
+from google import genai
 
 # بيانات الاعتماد من متغيرات البيئة على Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-client = Groq(api_key=GROQ_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_NAME = "gemini-2.5-flash"
 
 GERMANY_TZ = pytz.timezone("Europe/Berlin")
 PROGRESS_FILE = "lesson_progress.json"
 
-# خادم ويب خفيف جداً وفوري لإرضاء Render ومنع الخروج المبكر
+# خادم ويب خفيف لإبقاء الخدمة نشطة على Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -31,7 +32,6 @@ def run_server():
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     server.serve_forever()
 
-# تشغيل السيرفر فوراً في الخلفية قبل أي شيء آخر
 threading.Thread(target=run_server, daemon=True).start()
 
 A1_CURRICULUM = [
@@ -107,18 +107,6 @@ def save_progress(data):
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_free_model():
-    try:
-        models = client.models.list().data
-        for m in models:
-            mid = m.id
-            if "whisper" not in mid and "guard" not in mid and "tts" not in mid and "embed" not in mid and "preview" not in mid:
-                return mid
-    except Exception:
-        pass
-    # كاحتياطي أخير إذا لم تنجح القائمة التلقائية
-    return "llama-3.3-70b-versatile"
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "مرحباً بك في بوت تعلم الألمانية المجاني! 🇩🇪\n\n"
@@ -153,13 +141,11 @@ async def send_scheduled_lesson(context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        chosen_model = get_free_model()
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=chosen_model,
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
         )
-        lesson_text = chat_completion.choices[0].message.content
-        await context.bot.send_message(chat_id=chat_id, text=lesson_text)
+        await context.bot.send_message(chat_id=chat_id, text=response.text)
         progress["lesson_index"] = idx + 1
         save_progress(progress)
     except Exception as e:
@@ -179,7 +165,7 @@ async def test_lesson_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress = load_progress()
     progress["chat_id"] = update.effective_chat.id
     save_progress(progress)
-    await update.message.reply_text("⏳ جاري تحضير الدرس عبر النماذج المجانية...")
+    await update.message.reply_text("⏳ جاري تحضير الدرس عبر Gemini...")
     await send_scheduled_lesson(context)
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,16 +182,13 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     try:
-        chosen_model = get_free_model()
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=chosen_model,
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
         )
-        reply_text = response.choices[0].message.content
-        await update.message.reply_text(reply_text)
+        await update.message.reply_text(response.text)
     except Exception as e:
-        # يظهر لك الخطأ الفعلي مباشرة على تيليجرام لنعرف السبب إن وجد
-        await update.message.reply_text(f"⚠️ خطأ تقني من Groq: {str(e)}")
+        await update.message.reply_text(f"⚠️ خطأ تقني من Gemini: {str(e)}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -221,7 +204,7 @@ def main():
         time=datetime.time(hour=9, minute=0, tzinfo=GERMANY_TZ)
     )
 
-    print("🚀 البوت السحابي يعمل الآن بنجاح...")
+    print("🚀 البوت السحابي يعمل الآن بنجاح باستخدام Gemini...")
     application.run_polling()
 
 if __name__ == "__main__":
