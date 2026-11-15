@@ -3,6 +3,7 @@ import re
 import json
 import tempfile
 import datetime
+import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
@@ -12,7 +13,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from google import genai
 from google.genai import types
 
-# بيانات الاعتماد من متغيرات البيئة على Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -22,11 +22,9 @@ MODEL_NAME = "gemini-3.8-flash"
 GERMANY_TZ = pytz.timezone("Europe/Berlin")
 PROGRESS_FILE = "lesson_progress.json"
 
-# تخزين وضع كل مستخدم وذاكرة المحادثة المؤقتة (مجاني في الذاكرة)
-USER_MODES = {}      # "tutor" أو "translate"
-CHAT_HISTORIES = {}  # تخزين آخر 8 رسائل لكل مستخدم
+USER_MODES = {}
+CHAT_HISTORIES = {}
 
-# خادم ويب خفيف لإبقاء الخدمة نشطة على Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -115,14 +113,23 @@ def save_progress(data):
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# دالة استخراج الجمل الألمانية وتحويلها لصوت MP3 مجاناً
+# دالة ذكية لإعادة المحاولة تلقائياً في حال ضغط الخوادم (503)
+def safe_generate_content(contents):
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(model=MODEL_NAME, contents=contents)
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                if attempt < 2:
+                    time.sleep(2) # الانتظار لثانيتين وإعادة المحاولة
+                    continue
+            raise e
+
 def extract_german_phrases(text: str) -> str:
-    # البحث عن النصوص الألمانية المحصورة بين علامات 🇩🇪 أو النصوص اللاتينية الواضحة
     german_lines = []
     for line in text.splitlines():
         if "🇩🇪" in line:
             clean = re.sub(r"[🇩🇪*#_`:\-]", "", line).strip()
-            # إزالة أي حروف عربية من السطر لنطق الألمانية فقط
             clean = re.sub(r"[\u0600-\u06FF]+", "", clean).strip()
             if clean:
                 german_lines.append(clean)
@@ -142,42 +149,31 @@ async def send_german_voice(bot, chat_id: int, german_text: str):
     except Exception:
         pass
 
-# --- الأوامر ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     USER_MODES[chat_id] = "tutor"
     await update.message.reply_text(
         "مرحباً بك في معلم ومترجم الألمانية الذكي! 🇩🇪🇬🇧🇸🇦\n\n"
-        "📌 الأوضاع والأوامر المتاحة (مجانية 100%):\n"
-        "• `/translate` - تفعيل **وضع الترجمة الفورية** (تكتب بالعربي فيعطيك الألمانية + الإنجليزية + الصوت).\n"
-        "• `/tutor` - العودة إلى **وضع المعلم الذكي** للشرح والمحادثة التفاعلية.\n"
-        "• `/clear` - مسح ذاكرة المحادثة لبدء موضوع جديد.\n"
-        "• `/daily` - تفعيل الدرس اليومي الساعة 9:00 صباحاً.\n"
-        "• `/test_lesson` - استلام الدرس التجريبي الآن.\n\n"
-        "🎙️ أرسل **رسالة صوتية** بالألمانية لتصحيح نطقك، أو **صورة** لصفحة كتاب لشرحها!"
+        "📌 الأوامر المتاحة:\n"
+        "• `/translate` - وضع الترجمة الفورية (عربي ➔ ألماني وإنجليزي)\n"
+        "• `/tutor` - وضع المعلم الذكي والشرح\n"
+        "• `/clear` - مسح ذاكرة المحادثة\n"
+        "• `/daily` - تفعيل الدرس اليومي الساعة 9:00 صباحاً\n"
+        "• `/test_lesson` - استلام درس تجريبي الآن\n\n"
+        "🎙️ أرسل رسالة صوتية لتصحيح نطقك، أو صورة لشرحها!"
     )
 
 async def set_translate_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    USER_MODES[chat_id] = "translate"
-    await update.message.reply_text(
-        "🌐 **تم تفعيل وضع الترجمة الفورية!**\n"
-        "اكتب الآن أي كلمة أو جملة بالعربية، وسأعطيك ترجمتها فوراً بالألمانية (مع النطق الصوتي) وبالإنجليزية.\n\n"
-        "للعودة إلى وضع المعلم والشرح، أرسل: `/tutor`"
-    )
+    USER_MODES[update.effective_chat.id] = "translate"
+    await update.message.reply_text("🌐 تم تفعيل وضع الترجمة الفورية! اكتب أي جملة عربية وسأترجمها للألمانية والإنجليزية.")
 
 async def set_tutor_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    USER_MODES[chat_id] = "tutor"
-    await update.message.reply_text(
-        "🎓 **تم تفعيل وضع المعلم الذكي!**\n"
-        "اسألني أي سؤال في القواعد أو المحادثة، وسأتذكر سياق حديثنا وأشرح لك بالألمانية والإنجليزية والعربية."
-    )
+    USER_MODES[update.effective_chat.id] = "tutor"
+    await update.message.reply_text("🎓 تم تفعيل وضع المعلم الذكي!")
 
 async def clear_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    CHAT_HISTORIES[chat_id] = []
-    await update.message.reply_text("🧹 تم مسح ذاكرة المحادثة بنجاح. يمكنك بدء موضوع جديد الآن!")
+    CHAT_HISTORIES[update.effective_chat.id] = []
+    await update.message.reply_text("🧹 تم مسح ذاكرة المحادثة بنجاح.")
 
 async def send_scheduled_lesson(context: ContextTypes.DEFAULT_TYPE):
     progress = load_progress()
@@ -191,49 +187,39 @@ async def send_scheduled_lesson(context: ContextTypes.DEFAULT_TYPE):
         idx = 0
 
     topic = A1_CURRICULUM[idx]
-
     prompt = (
-        f"أنت معلم لغة ألمانية محترف. اكتب درساً يومياً لمستوى A1 حول:\n"
-        f"'{topic}'\n\n"
-        f"التزم بالتنسيق التالي:\n"
-        f"1. عنوان الدرس ورقمه ({idx + 1}/60).\n"
-        f"2. شرح القاعدة بالعربية البسيطة.\n"
-        f"3. أهم 5 كلمات/عبارات مع وضع علم 🇩🇪 قبل كل جملة ألمانية، ثم ترجمتها بالإنجليزية 🇬🇧 والعربية 🇸🇦.\n"
-        f"4. حوار قصير عملي (ضع علم 🇩🇪 قبل الجمل الألمانية) مع الترجمة الإنجليزية والعربية.\n"
-        f"5. سؤال تمرين صغير في النهاية."
+        f"أنت معلم لغة ألمانية محترف. اكتب درساً يومياً لمستوى A1 حول:\n'{topic}'\n\n"
+        f"التزم بالتنسيق التالي:\n1. عنوان الدرس ورقمه ({idx + 1}/60).\n"
+        f"2. شرح القاعدة بالعربية.\n3. أهم 5 كلمات مع علم 🇩🇪 وترجمتها بالإنجليزية 🇬🇧 والعربية 🇸🇦.\n"
+        f"4. حوار قصير مع الترجمة.\n5. سؤال تمرين."
     )
 
     try:
-        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+        response = safe_generate_content(prompt)
         lesson_text = response.text
         await context.bot.send_message(chat_id=chat_id, text=lesson_text)
         
-        # إرسال النطق الصوتي لكلمات الدرس
         german_audio_text = extract_german_phrases(lesson_text)
         await send_german_voice(context.bot, chat_id, german_audio_text)
 
         progress["lesson_index"] = idx + 1
         save_progress(progress)
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ في إرسال الدرس: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ مؤقت في الخوادم، حاول مجدداً بعد قليل: {str(e)}")
 
 async def enable_daily_lessons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress = load_progress()
     progress["chat_id"] = update.effective_chat.id
     save_progress(progress)
-    await update.message.reply_text(
-        "✅ تم تفعيل الدروس اليومية بنجاح! ستصلك رسالة درس + تسجيل صوتي يومياً الساعة 09:00 صباحاً بتوقيت ألمانيا.\n"
-        "لتجربة درس الآن أرسل: `/test_lesson`"
-    )
+    await update.message.reply_text("✅ تم تفعيل الدروس اليومية الساعة 9:00 صباحاً.")
 
 async def test_lesson_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress = load_progress()
     progress["chat_id"] = update.effective_chat.id
     save_progress(progress)
-    await update.message.reply_text("⏳ جاري تحضير الدرس مع النطق الصوتي...")
+    await update.message.reply_text("⏳ جاري تحضير الدرس...")
     await send_scheduled_lesson(context)
 
-# --- معالجة الرسائل النصية (ترجمة فورية أو معلم بذاكرة) ---
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     if user_text.startswith("/"):
@@ -241,125 +227,86 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     chat_id = update.effective_chat.id
     mode = USER_MODES.get(chat_id, "tutor")
-
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
         if mode == "translate":
             prompt = (
-                f"ترجم النص التالي بدقة وسرعة من العربية (أو أي لغة مكتوبة) إلى الألمانية والإنجليزية.\n"
-                f"التزم بهذا التنسيق المختصر والمباشر فقط:\n"
-                f"🇩🇪 [الترجمة الألمانية الطبيعية]\n"
-                f"🗣️ النطق التقريبي بالعربي: [طريقة النطق]\n"
-                f"🇬🇧 [الترجمة الإنجليزية]\n"
-                f"💡 ملاحظة سريعة: [ملاحظة لغوية أو صيغة رسمية/غير رسمية إن وجدت]\n\n"
-                f"النص المطلوب ترجمته: {user_text}"
+                f"ترجم النص بدقة من العربية إلى الألمانية والإنجليزية بالشكل التالي:\n"
+                f"🇩🇪 [الترجمة الألمانية]\n🗣️ النطق: [الطريقة]\n🇬🇧 [الإنجليزية]\n\nالنص: {user_text}"
             )
-            response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-            reply_text = response.text
-            await update.message.reply_text(reply_text)
-
-            german_audio_text = extract_german_phrases(reply_text)
-            await send_german_voice(context.bot, chat_id, german_audio_text)
-
         else:
-            # وضع المعلم مع ذاكرة المحادثة (آخر 8 رسائل)
             history = CHAT_HISTORIES.setdefault(chat_id, [])
             history_context = "\n".join(history[-8:])
-
             prompt = (
-                f"أنت معلم لغة ألمانية ذكي لمستوى المبتدئين (A1). أجب بالعربية، وعند ذكر أي جملة ألمانية ضع قبلها علم 🇩🇪 "
-                f"واكتب مقابلها بالإنجليزية 🇬🇧 والعربية 🇸🇦 لتسهيل الفهم.\n"
-                f"سياق المحادثة السابقة:\n{history_context}\n\n"
-                f"رسالة الطالب الجديدة: {user_text}"
+                f"أنت معلم ألمانية A1. أجب بالعربية، وضع علم 🇩🇪 قبل الألمانية ومقابلها 🇬🇧 و 🇸🇦.\n"
+                f"السياق:\n{history_context}\n\nسؤال الطالب: {user_text}"
             )
-            response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-            reply_text = response.text
 
+        response = safe_generate_content(prompt)
+        reply_text = response.text
+
+        if mode != "translate":
             history.append(f"الطالب: {user_text}")
             history.append(f"المعلم: {reply_text}")
 
-            await update.message.reply_text(reply_text)
-
-            german_audio_text = extract_german_phrases(reply_text)
-            await send_german_voice(context.bot, chat_id, german_audio_text)
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ خطأ تقني من Gemini: {str(e)}")
-
-# --- معالجة الرسائل الصوتية (تصحيح النطق) ---
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    try:
-        voice_file = await update.message.voice.get_file()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
-            temp_path = tmp.name
-        await voice_file.download_to_drive(temp_path)
-
-        with open(temp_path, "rb") as f:
-            audio_bytes = f.read()
-        os.remove(temp_path)
-
-        prompt = (
-            "استمع إلى هذه الرسالة الصوتية من طالب يتعلم اللغة الألمانية (مستوى A1). "
-            "1. اكتب ما سمعته بالألمانية (ضع علم 🇩🇪 قبل الجملة الصحيحة).\n"
-            "2. اكتب ترجمتها بالإنجليزية 🇬🇧 والعربية 🇸🇦.\n"
-            "3. قيّم نطق الطالب وشجعه، ووضح له بلطف أي حرف أو كلمة تحتاج تحسيناً في النطق."
-        )
-
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[
-                types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg"),
-                prompt
-            ]
-        )
-        await update.message.reply_text(response.text)
-
-        german_audio_text = extract_german_phrases(response.text)
+        await update.message.reply_text(reply_text)
+        german_audio_text = extract_german_phrases(reply_text)
         await send_german_voice(context.bot, chat_id, german_audio_text)
 
     except Exception as e:
-        await update.message.reply_text(f"⚠️ تعذر تحليل الرسالة الصوتية: {str(e)}")
+        await update.message.reply_text(f"⚠️ الخوادم مشغولة مؤقتاً (خطأ 503). يجدر بك المحاولة بعد ثوانٍ.")
 
-# --- معالجة الصور (ترجمة وشرح صفحات الكتب) ---
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    try:
+        file = await update.message.voice.get_file()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+            path = tmp.name
+        await file.download_to_drive(path)
+        with open(path, "rb") as f:
+            b_data = f.read()
+        os.remove(path)
+
+        prompt = "استمع للرسالة الصوتية لطالب A1 ألماني. صحح نطقه واكتب ما قاله بالألمانية 🇩🇪 والإنجليزية 🇬🇧 والعربية 🇸🇦."
+        response = safe_generate_content([types.Part.from_bytes(data=b_data, mime_type="audio/ogg"), prompt])
+        await update.message.reply_text(response.text)
+        await send_german_voice(context.bot, chat_id, extract_german_phrases(response.text))
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ تعذر معالجة الصوت بسبب الضغط المؤقت.")
+
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
     try:
         photo = update.message.photo[-1]
-        photo_file = await photo.get_file()
+        file = await photo.get_file()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            temp_path = tmp.name
-        await photo_file.download_to_drive(temp_path)
+            path = tmp.name
+        await file.download_to_drive(path)
+        with open(path, "rb") as f:
+            b_data = f.read()
+        os.remove(path)
 
-        with open(temp_path, "rb") as f:
-            image_bytes = f.read()
-        os.remove(temp_path)
-
-        user_caption = update.message.caption or "اشرح محتوى هذه الصورة أو حل التمرين الموجود فيها."
-        prompt = (
-            f"أنت معلم لغة ألمانية. حلل هذه الصورة وأجب عن طلب الطالب: '{user_caption}'.\n"
-            f"اشرح بالعربية، وترجم الجمل المهمة إلى الألمانية 🇩🇪 والإنجليزية 🇬🇧."
-        )
-
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                prompt
-            ]
-        )
+        prompt = update.message.caption or "اشرح محتوى هذه الصورة باللغة الألمانية."
+        response = safe_generate_content([types.Part.from_bytes(data=b_data, mime_type="image/jpeg"), prompt])
         await update.message.reply_text(response.text)
-
     except Exception as e:
-        await update.message.reply_text(f"⚠️ تعذر تحليل الصورة: {str(e)}")
+        await update.message.reply_text(f"⚠️ تعذر معالجة الصورة بسبب الضغط المؤقت.")
+
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        ("start", "رسالة الترحيب والتعريف"),
+        ("translate", "وضع الترجمة الفورية (عربي ➔ ألماني وإنجليزي)"),
+        ("tutor", "وضع المعلم الذكي والقواعد"),
+        ("test_lesson", "استلام درس A1 تجريبي مع النطق"),
+        ("daily", "تفعيل الدروس اليومية الساعة 9 ص"),
+        ("clear", "مسح ذاكرة المحادثة")
+    ])
 
 def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("translate", set_translate_mode))
@@ -378,7 +325,7 @@ def main():
         time=datetime.time(hour=9, minute=0, tzinfo=GERMANY_TZ)
     )
 
-    print("🚀 البوت المطور (معلم + مترجم + صوتيات + صور) يعمل الآن...")
+    print("🚀 البوت يعمل مع نظام الحماية ضد الضغط (503)...")
     application.run_polling()
 
 if __name__ == "__main__":
