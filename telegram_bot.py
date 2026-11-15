@@ -108,7 +108,16 @@ def save_progress(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_free_model():
-    return "llama3-8b-8192"
+    try:
+        models = client.models.list().data
+        for m in models:
+            mid = m.id
+            if "whisper" not in mid and "guard" not in mid and "tts" not in mid and "embed" not in mid and "preview" not in mid:
+                return mid
+    except Exception:
+        pass
+    # كاحتياطي أخير إذا لم تنجح القائمة التلقائية
+    return "llama-3.3-70b-versatile"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
