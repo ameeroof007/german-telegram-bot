@@ -1,19 +1,35 @@
 import os
 import json
 import datetime
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# بيانات الاعتماد ومفتاحك المجاني
+# بيانات الاعتماد من متغيرات البيئة على Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
 
 GERMANY_TZ = pytz.timezone("Europe/Berlin")
-PROGRESS_FILE = "/Users/ameer/my_ai_agent/lesson_progress.json"
+PROGRESS_FILE = "lesson_progress.json"
+
+# خادم ويب وهمي لإرضاء متطلبات Render Web Service المجاني وعدم حدوث Port Timeout
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is active!")
+    def log_message(self, format, *args):
+        pass
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server.serve_forever()
 
 A1_CURRICULUM = [
     "1. التحية والوداع (Hallo, Guten Morgen, Tschüss)",
@@ -105,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 الأوامر المتاحة:\n"
         "• `/daily` - لتفعيل استلام درس يومي الساعة 9:00 صباحاً.\n"
         "• `/test_lesson` - لاستلام الدرس التجريبي الآن.\n\n"
-        "💬 **ميزة جديدة:** يمكنك في أي وقت إرسال أي سؤال حول اللغة الألمانية، وسيقوم المعلم الذكي بالإجابة عليك فوراً!"
+        "💬 يمكنك في أي وقت إرسال أي سؤال حول اللغة الألمانية، وسيقوم المعلم الذكي بالإجابة عليك فوراً!"
     )
 
 async def send_scheduled_lesson(context: ContextTypes.DEFAULT_TYPE):
@@ -150,60 +166,4 @@ async def enable_daily_lessons(update: Update, context: ContextTypes.DEFAULT_TYP
     save_progress(progress)
     await update.message.reply_text(
         "✅ تم تفعيل نظام الدروس اليومية بنجاح!\n"
-        "ستصلك رسالة درس واحدة يومياً في الساعة 09:00 صباحاً بتوقيت ألمانيا.\n\n"
-        "للحصول على الدرس التجريبي الآن فوراً، أرسل: /test_lesson"
-    )
-
-async def test_lesson_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    progress = load_progress()
-    progress["chat_id"] = update.effective_chat.id
-    save_progress(progress)
-    await update.message.reply_text("⏳ جاري تحضير الدرس عبر النماذج المجانية...")
-    await send_scheduled_lesson(context)
-
-async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    if user_text.startswith("/"):
-        return  # تجاهل الأوامر
-
-    # إعلام المستخدم أن البوت يكتب الرد
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
-    prompt = (
-        f"أنت معلم لغة ألمانية صبور ومحترف لمستوى المبتدئين (A1). "
-        f"أجب عن سؤال الطالب التالي باللغة العربية مع توضيح الأمثلة بالألمانية وترجمتها:\n\n"
-        f"سؤال الطالب: {user_text}"
-    )
-
-    try:
-        chosen_model = get_free_model()
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=chosen_model,
-        )
-        reply_text = response.choices[0].message.content
-        await update.message.reply_text(reply_text)
-    except Exception as e:
-        await update.message.reply_text("عذراً، حدث خطأ بسيط أثناء معالجة سؤالك. حاول مجدداً بعد قليل.")
-
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("daily", enable_daily_lessons))
-    application.add_handler(CommandHandler("test_lesson", test_lesson_now))
-    
-    # معالجة الرسائل العادية النصية (الأسئلة الحرة)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
-
-    job_queue = application.job_queue
-    job_queue.run_daily(
-        send_scheduled_lesson,
-        time=datetime.time(hour=9, minute=0, tzinfo=GERMANY_TZ)
-    )
-
-    print("🚀 البوت الذكي يعمل الآن بنجاح مع ميزة الأسئلة الحرة...")
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
+        "ستصلك رسالة درس واحدة يومياً في الساعة 09:0
