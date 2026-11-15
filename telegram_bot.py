@@ -17,19 +17,22 @@ client = Groq(api_key=GROQ_API_KEY)
 GERMANY_TZ = pytz.timezone("Europe/Berlin")
 PROGRESS_FILE = "lesson_progress.json"
 
-# خادم ويب وهمي لإرضاء متطلبات Render Web Service المجاني وعدم حدوث Port Timeout
-class DummyHandler(BaseHTTPRequestHandler):
+# خادم ويب خفيف جداً وفوري لإرضاء Render ومنع الخروج المبكر
+class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is active!")
+        self.wfile.write(b"OK")
     def log_message(self, format, *args):
         pass
 
-def run_dummy_server():
+def run_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     server.serve_forever()
+
+# تشغيل السيرفر فوراً في الخلفية قبل أي شيء آخر
+threading.Thread(target=run_server, daemon=True).start()
 
 A1_CURRICULUM = [
     "1. التحية والوداع (Hallo, Guten Morgen, Tschüss)",
@@ -169,3 +172,54 @@ async def enable_daily_lessons(update: Update, context: ContextTypes.DEFAULT_TYP
         "ستصلك رسالة درس واحدة يومياً في الساعة 09:00 صباحاً بتوقيت ألمانيا.\n\n"
         "للحصول على الدرس التجريبي الآن فوراً، أرسل: /test_lesson"
     )
+
+async def test_lesson_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    progress = load_progress()
+    progress["chat_id"] = update.effective_chat.id
+    save_progress(progress)
+    await update.message.reply_text("⏳ جاري تحضير الدرس عبر النماذج المجانية...")
+    await send_scheduled_lesson(context)
+
+async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    if user_text.startswith("/"):
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    prompt = (
+        f"أنت معلم لغة ألمانية صبور ومحترف لمستوى المبتدئين (A1). "
+        f"أجب عن سؤال الطالب التالي باللغة العربية مع توضيح الأمثلة بالألمانية وترجمتها:\n\n"
+        f"سؤال الطالب: {user_text}"
+    )
+
+    try:
+        chosen_model = get_free_model()
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=chosen_model,
+        )
+        reply_text = response.choices[0].message.content
+        await update.message.reply_text(reply_text)
+    except Exception:
+        await update.message.reply_text("عذراً، حدث خطأ بسيط أثناء معالجة سؤالك. حاول مجدداً بعد قليل.")
+
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("daily", enable_daily_lessons))
+    application.add_handler(CommandHandler("test_lesson", test_lesson_now))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
+
+    job_queue = application.job_queue
+    job_queue.run_daily(
+        send_scheduled_lesson,
+        time=datetime.time(hour=9, minute=0, tzinfo=GERMANY_TZ)
+    )
+
+    print("🚀 البوت السحابي يعمل الآن بنجاح...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
